@@ -1,0 +1,20 @@
+# generated artifacts
+*_strings.txt
+*_players.txt
+/schema/*.json
+__pycache__/
+*.pyc
+.venv/
+/target/
+*.egg-info/
+.pytest_cache/
+
+# replay samples are not redistributed — supply your own under replays/
+replays/*.replay
+
+# generated analysis artifacts
+/*_deltas.json
+/*_plain_props.json
+
+# internal notes (not for publication)
+/docs/

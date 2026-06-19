@@ -42,11 +42,21 @@ class Container:
 
 @dataclass
 class SchemaField:
-    """A field of a network class: a ``key = id`` leaf in the schema."""
+    """A field of a network class.
+
+    In the embedded schema a field is a small list ``[ name=id, TypeName=id, int, int ]``.
+    We keep the field ``name``/``id``, the referenced wire-type name (``type``, e.g.
+    ``CPlainFloat32`` / ``CFixedVec3``), and the two trailing integers: ``type_hash`` (the
+    reflection type id of the wire type — constant per type, not a per-field parameter) and
+    ``flag`` (a per-field flag). The wire-type name determines how the field's bytes are
+    encoded; see :mod:`heat_replay.wiretypes`.
+    """
 
     name: str
     id: int
-    type: str | None = None  # referenced type name, e.g. "CInt32", if present
+    type: str | None = None  # referenced wire-type name, e.g. "CPlainFloat32", if present
+    type_hash: int | None = None  # trailing type-hash (per wire type, not per field)
+    flag: int | None = None  # trailing per-field flag
 
 
 @dataclass

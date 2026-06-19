@@ -30,8 +30,14 @@ for frame, name, fields in r.decoded_events():   # typed events
 
 r.events(); r.baselines(); r.records         # lower-level: typed records
 r.property_deltas()                          # replication deltas: (frame, handle, raw value)
+r.field_types()                              # per-field wire types (build-stable across replays)
 r.protocol                                   # the embedded protocol schema (189 classes / 667 fields)
 ```
+
+The schema names a **wire type** for every replicated field (`CPlainFloat32`, `CFixedVec3`,
+`CBounded32`, …). `field_types()` surfaces them, and `heat_replay.wiretypes` provides a
+`WireType` enum, `classify()`, and bit-level `decode()` primitives for the self-describing
+types (plain floats/vec3/ints/bools). See [What's decoded](#whats-decoded) for the caveat.
 
 `parse()` returns a fully-structured `Replay` — consumers never touch raw bytes for the container,
 schema, record stream, events, roster, or summary.
@@ -52,8 +58,13 @@ heat-replay summary <file> [--json]              high-level match summary
   metadata & result, roster (vehicle types + frontmen), event timeline.
 - **Structurally** (correct framing, raw values exposed): replication property deltas, and the
   `PlayerInput`/`ClientShoot` event fields (values correct, some field meanings unconfirmed).
-- **Not implemented**: typed decoding of the quantized replication values (e.g. positions/health).
-  Those are exposed as raw deltas via `property_deltas()`.
+- **Field types**: the schema's wire type for every replicated field is parsed and exposed via
+  `field_types()` (build-stable across replays). Bit-level `decode()` primitives exist for the
+  self-describing types.
+- **Not implemented**: typed decoding of the quantized replication *values* (e.g.
+  positions/health). The replication journal (tags 4/8) is bit-packed relative-delta, so reading
+  a value needs the per-entity field-layout linkage, which is not established yet. Values are
+  exposed as raw deltas via `property_deltas()`.
 
 ## Tests
 

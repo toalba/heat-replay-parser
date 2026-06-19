@@ -24,6 +24,7 @@ import json
 import re
 
 from heat_replay.model import ClassDef, Protocol, SchemaField
+from heat_replay.wiretypes import classify
 
 # ---------------------------------------------------------------------------
 # Extraction: reassemble the schema text from raw replay bytes.
@@ -353,16 +354,31 @@ def _collect_fields(class_list_node) -> list[SchemaField]:
             name = None
             fid = None
             ftype = None
+            trailing_ints: list[int] = []  # numeric-keyed leaves after name/type
             for sub in child[1]:
-                if sub[0] == "leaf" and sub[1][0] == "name":
-                    nm = sub[1][1]
+                if sub[0] != "leaf":
+                    continue
+                key = sub[1]
+                if key[0] == "name":
+                    nm = key[1]
                     if name is None:
                         name = nm
                         fid = sub[2]
                     elif ftype is None and _looks_like_type(nm):
                         ftype = nm
+                elif key[0] == "int" and name is not None:
+                    # The wire-type carries two trailing numeric leaves: a type-hash then a
+                    # per-field flag. The number is in the key, not the positional id.
+                    try:
+                        trailing_ints.append(int(key[1]))
+                    except ValueError:  # pragma: no cover - guards malformed digits
+                        pass
             if name is not None and fid is not None:
-                fields.append(SchemaField(name=name, id=fid, type=ftype))
+                type_hash = trailing_ints[0] if len(trailing_ints) >= 1 else None
+                flag = trailing_ints[1] if len(trailing_ints) >= 2 else None
+                fields.append(
+                    SchemaField(name=name, id=fid, type=ftype, type_hash=type_hash, flag=flag)
+                )
         elif child[0] == "leaf" and child[1][0] == "name":
             # A bare named leaf directly inside the class list is also a field.
             fields.append(SchemaField(name=child[1][1], id=child[2]))
@@ -436,6 +452,9 @@ def _proto_to_dict(proto: Protocol) -> dict:
                         "id": f.id,
                         "id_hex": f"{f.id:02X}",
                         "type": f.type,
+                        "wire_type": classify(f.type).name,
+                        "type_hash": f.type_hash,
+                        "flag": f.flag,
                     }
                     for f in cdef.fields
                 ],

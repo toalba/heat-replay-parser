@@ -61,6 +61,28 @@ def test_summary_and_roster(sample_path):
     json.dumps(s)  # must be JSON-serialisable
 
 
+def test_field_types(sample_path):
+    r = heat_replay.parse(str(sample_path))
+    fts = r.field_types()
+    assert fts, "expected a non-empty field-type list"
+    # well-formed rows
+    assert all(set(f) == {"class", "field", "type", "wire_type", "decodable"} for f in fts)
+    # the self-describing plain types are present and flagged decodable
+    plain = [f for f in fts if f["wire_type"] in ("PLAIN_FLOAT32", "PLAIN_VEC3")]
+    assert plain and all(f["decodable"] for f in plain)
+    # quantized types are present but not decodable from the type alone
+    quant = [f for f in fts if f["wire_type"] in ("FIXED_VEC3", "BOUNDED32", "FIXED_QUAT")]
+    assert quant and not any(f["decodable"] for f in quant)
+    import json
+
+    json.dumps(fts)  # must be JSON-serialisable
+
+
+def test_field_types_empty_without_schema(sample_path):
+    r = heat_replay.parse(str(sample_path), with_schema=False)
+    assert r.field_types() == []
+
+
 def test_parse_without_schema(sample_path):
     r = heat_replay.parse(str(sample_path), with_schema=False)
     assert r.protocol is None

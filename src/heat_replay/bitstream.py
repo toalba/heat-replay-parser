@@ -52,6 +52,22 @@ class ReadStream:
     def read_bool(self) -> bool:
         return self.read_bits(1) != 0
 
+    def read_int(self, n: int = 32) -> int:
+        """Read an ``n``-bit two's-complement signed integer."""
+        v = self.read_bits(n)
+        return v - (1 << n) if v & (1 << (n - 1)) else v
+
+    def read_float32(self) -> float:
+        """Read a 32-bit IEEE-754 float (the bits, reinterpreted)."""
+        return struct.unpack("<f", struct.pack("<I", self.read_bits(32)))[0]
+
+    def skip(self, n: int) -> None:
+        """Advance the read cursor by ``n`` bits."""
+        while n > 0:
+            take = min(n, 64)
+            self.read_bits(take)
+            n -= take
+
 
 # Width (in bits) of a component id in the baseline-cache header.
 COMPONENT_ID_WIDTH = 7

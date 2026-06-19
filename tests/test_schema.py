@@ -84,3 +84,36 @@ def test_known_classes_and_fields(samples):
     field_names = {f.name for f in shoot.fields}
     assert "frameId" in field_names
     assert "gunNetworkId" in field_names
+
+
+def test_field_wire_types_captured(samples):
+    """Fields carry their wire-type name plus the trailing type-hash and flag."""
+    proto = parse_schema(
+        extract_schema_text(_read(next(iter(samples.values())))), REFERENCE_COMMIT
+    )
+    typed = [f for c in proto.classes_by_name.values() for f in c.fields if f.type]
+    assert typed, "expected at least some fields with a wire type"
+    # A typed field captures the trailing type-hash and flag from the schema.
+    with_hash = [f for f in typed if f.type_hash is not None and f.flag is not None]
+    assert with_hash, "expected typed fields to carry type_hash + flag"
+    # The plain float/vec3 wire types must appear (the self-describing, decodable ones).
+    type_names = {f.type for f in typed}
+    assert "CPlainFloat32" in type_names
+    assert "CPlainVec3" in type_names
+
+
+def test_field_type_map_identical_across_samples(samples):
+    """The (class, field) -> wire-type map is build-stable, like the flat index."""
+    maps: dict[str, list] = {}
+    for key, path in samples.items():
+        proto = parse_schema(extract_schema_text(_read(path)), REFERENCE_COMMIT)
+        maps[key] = sorted(
+            (c.name, f.name, f.type)
+            for c in proto.classes_by_name.values()
+            for f in c.fields
+        )
+    keys = list(maps)
+    reference = maps[keys[0]]
+    assert reference, "expected a non-empty field-type map"
+    for key in keys[1:]:
+        assert maps[key] == reference, f"field-type map for {key!r} differs"

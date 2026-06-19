@@ -32,6 +32,7 @@ from heat_replay.stream import referenced_assets as _assets
 from heat_replay.summary import build_summary as _summary
 from heat_replay.summary import frontmen as _frontmen
 from heat_replay.summary import roster as _roster
+from heat_replay.wiretypes import WireType, classify
 
 __version__ = "0.1.0"
 
@@ -48,6 +49,8 @@ __all__ = [
     "StreamWalk",
     "Protocol",
     "Container",
+    "WireType",
+    "classify",
     "decode_event",
     "REFERENCE_COMMIT",
     "__version__",
@@ -151,6 +154,32 @@ class Replay:
         Framing is decoded; decoding the raw value into typed data is not implemented.
         """
         return _deltas(self.stream)
+
+    def field_types(self) -> list[dict]:
+        """Every replicated field with its wire type, across all schema classes.
+
+        Returns ``[{"class", "field", "type", "wire_type", "decodable"}]`` (sorted). The
+        schema names a wire type for every field; ``wire_type`` is the :class:`WireType`
+        category and ``decodable`` flags the self-describing types (plain floats, ints,
+        bools) that need no per-type quantization constant. This map is build-stable
+        (identical across replays of the same build).
+        """
+        out: list[dict] = []
+        if self.protocol is None:
+            return out
+        for cname in sorted(self.protocol.classes_by_name):
+            for f in self.protocol.classes_by_name[cname].fields:
+                wt = classify(f.type)
+                out.append(
+                    {
+                        "class": cname,
+                        "field": f.name,
+                        "type": f.type,
+                        "wire_type": wt.name,
+                        "decodable": wt.is_decodable,
+                    }
+                )
+        return out
 
     def decoded_events(self) -> list[tuple[int, str, dict]]:
         """Reflected events with their decoded fields: ``(frame_id, event_name, fields)``.

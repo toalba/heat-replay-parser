@@ -23,7 +23,6 @@ from heat_replay.container import Container, read_bytes
 from heat_replay.events import decode_event
 from heat_replay.model import Protocol
 from heat_replay.objects import ReplicatedObject
-from heat_replay.objects import moving_objects as _moving_objects
 from heat_replay.objects import replicated_objects as _objects
 from heat_replay.schema import parse_schema
 from heat_replay.stream import PropertyDelta, Record, StreamWalk
@@ -221,7 +220,9 @@ class Replay:
 
     def moving_objects(self) -> list[ReplicatedObject]:
         """Replicated objects with at least one decoded position (the position-readable subset)."""
-        return _moving_objects(self.stream)
+        # Filter the same list objects() builds — avoids a second full record scan and keeps the
+        # two views consistent.
+        return [o for o in self.objects() if o.positions]
 
     def roster(self) -> list[dict]:
         """Distinct vehicle types in the match (``[{"nation", "vehicle"}]``)."""

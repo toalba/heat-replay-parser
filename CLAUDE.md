@@ -101,10 +101,31 @@ over ~100k packets across the samples, with deterministic alignment on spawn mes
 sequence id is a `u16` that wraps and reuses values, cross-packet reference resolution must take the
 **most-recent prior** occurrence (encoded as a tested requirement).
 
-Still open — a dense per-frame *world-space* trajectory now reduces to two bounded steps on top of
-the framing: (1) per-entity **value** decode (resolving the entity-id codec against a wrap-aware
-sequence-id map) for cross-packet tracking, then (2) the **per-component property value codecs** to
-consume each message body. Quantized positional fields additionally need their per-field
-quantization constants, which are **not carried in the replay file** (external parameter capture).
-The self-delimiting packed-scalar path is implemented and the entity track above is the scaffold a
-decode attaches to. Detailed record in `docs/` (gitignored).
+The message **body** layer is now decoded and validated too: each entity message carries a
+component stream — a per-component selector (an explicit `7`-bit component id, **or** a `2`-bit
+back-reference into a small cache), a per-component update mode (delta / add / remove), then one
+**presence bit per property** with the changed properties' values inline. The component
+back-reference cache is a **persistent, move-to-front list of the four most-recently-seen
+components** that carries across packets (≈ 99.95% in-range across the four samples; a per-packet
+reset does not fit). Correctness is cross-checked by an independent oracle: an externally-captured
+per-property bit-width set — every property it covers validates **exactly** against the bit count
+this walk consumes (including a 12-property component), proving byte-exact alignment of the whole
+body walk wherever per-property widths are known.
+
+The per-property value codecs turned out to be **recoverable from the embedded schema** after all:
+each field's codec *type* is named in the schema (in the verified component space — its types
+reproduce the externally-captured bit-widths exactly, down to a 12-property component), and the
+quantization tier tables are a small fixed set. The **moving-transform position value codec is
+decoded and validated**: its bit-consumption matches the captured ground-truth widths exactly
+(uniquely fixing the tier table), and a drift-free read decodes to a coordinate that lands on a
+known map position. The remaining work is two-fold and bounded:
+
+1. **A short residual codec list** — length-prefixed strings / id-references / vectors / a few enums
+   (mostly structural), plus a handful of components whose schema class is unmapped. Several are
+   implemented; the rest are the finishing grind.
+2. **Per-entity trajectory assembly** — turning correct per-frame position *reads* into per-entity
+   *paths* needs cross-packet entity identity (the reference-relative id codec resolved against the
+   previous packet's id-list), which in turn needs near-complete packet walks to build correct
+   id-lists. So a dense world-space trajectory is gated on raising codec coverage (item 1) enough for
+   reliable identity, then grouping by it. The position value itself is correct — assembling the path
+   is the next step. Detailed record in `docs/` (gitignored).

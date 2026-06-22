@@ -9,8 +9,9 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
-# replay samples are not redistributed — supply your own under replays/
+# replay samples are not redistributed — ignore anywhere, not just under replays/
 replays/*.replay
+*.replay
 
 # generated analysis artifacts
 /*_deltas.json

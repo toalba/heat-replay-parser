@@ -93,10 +93,18 @@ cadence) for every replicated entity across the whole match — see
 `examples/track_tag4_entities.py`. Identity and lifetime are fully determined by the replay;
 world positions are not (next paragraph).
 
-Still open — a dense per-frame *world-space* trajectory: the per-frame channel body is a
-bit-packed **delta** stream. Measured exhaustively (no absolute positions decode from it at any
-offset/param; baselines are spawn-only), so a metric trajectory needs (1) a baseline cache +
-stateful delta-application client and (2) the delta codec's per-field quantization constants,
-which are **not carried in the replay file** — they require an external parameter capture. The
-self-delimiting packed-scalar path is implemented and the entity track above is the scaffold a
-decode would attach to. Detailed record in `docs/` (gitignored).
+Now framed and validated — the per-frame (tag-4) channel: each packet carries a fixed header (a
+`u16` sequence id that increments and **wraps**, a tick counter, and a reference field) followed by
+a **self-delimiting per-entity message stream** (a reference-relative entity-id codec → message
+type → full-sync/delta body). This framing is **solved** — proven by a 0-error self-delimiting parse
+over ~100k packets across the samples, with deterministic alignment on spawn messages. Because the
+sequence id is a `u16` that wraps and reuses values, cross-packet reference resolution must take the
+**most-recent prior** occurrence (encoded as a tested requirement).
+
+Still open — a dense per-frame *world-space* trajectory now reduces to two bounded steps on top of
+the framing: (1) per-entity **value** decode (resolving the entity-id codec against a wrap-aware
+sequence-id map) for cross-packet tracking, then (2) the **per-component property value codecs** to
+consume each message body. Quantized positional fields additionally need their per-field
+quantization constants, which are **not carried in the replay file** (external parameter capture).
+The self-delimiting packed-scalar path is implemented and the entity track above is the scaffold a
+decode attaches to. Detailed record in `docs/` (gitignored).

@@ -22,6 +22,9 @@ from dataclasses import dataclass
 from heat_replay.container import Container, read_bytes
 from heat_replay.events import decode_event
 from heat_replay.model import Protocol
+from heat_replay.objects import ReplicatedObject
+from heat_replay.objects import moving_objects as _moving_objects
+from heat_replay.objects import replicated_objects as _objects
 from heat_replay.schema import parse_schema
 from heat_replay.stream import PropertyDelta, Record, StreamWalk
 from heat_replay.stream import baselines as _baselines
@@ -32,7 +35,7 @@ from heat_replay.stream import referenced_assets as _assets
 from heat_replay.summary import build_summary as _summary
 from heat_replay.summary import frontmen as _frontmen
 from heat_replay.summary import roster as _roster
-from heat_replay.wiretypes import WireType, classify
+from heat_replay.wiretypes import WireType, classify, field_wire_type
 
 __version__ = "0.1.0"
 
@@ -49,8 +52,10 @@ __all__ = [
     "StreamWalk",
     "Protocol",
     "Container",
+    "ReplicatedObject",
     "WireType",
     "classify",
+    "field_wire_type",
     "decode_event",
     "REFERENCE_COMMIT",
     "__version__",
@@ -169,7 +174,7 @@ class Replay:
             return out
         for cname in sorted(self.protocol.classes_by_name):
             for f in self.protocol.classes_by_name[cname].fields:
-                wt = classify(f.type)
+                wt = field_wire_type(f)
                 out.append(
                     {
                         "class": cname,
@@ -204,6 +209,19 @@ class Replay:
                 if fields and "result" in fields:
                     return fields["result"]
         return None
+
+    def objects(self) -> list[ReplicatedObject]:
+        """All replicated-entity lifetimes, identified by prefab, with decoded transform positions
+        where the transform component is reachable at a baseline head.
+
+        Each :class:`ReplicatedObject` carries ``entity_id``, ``prefab``, ``category`` (vehicle /
+        player / projectile / …), the frame span it was seen, and any decoded ``positions``.
+        """
+        return _objects(self.stream)
+
+    def moving_objects(self) -> list[ReplicatedObject]:
+        """Replicated objects with at least one decoded position (the position-readable subset)."""
+        return _moving_objects(self.stream)
 
     def roster(self) -> list[dict]:
         """Distinct vehicle types in the match (``[{"nation", "vehicle"}]``)."""

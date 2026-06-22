@@ -61,6 +61,14 @@ def build_summary(replay) -> dict:
         if battle_result is None and name.startswith("cw::BattleResultReplayEvent"):
             battle_result = fields.get("result")
 
+    # replicated-object identification (entity lifetimes by category)
+    obj_counts: collections.Counter = collections.Counter()
+    pos_readable = 0
+    for o in replay.objects():
+        obj_counts[o.category] += 1
+        if o.positions:
+            pos_readable += 1
+
     return {
         "path": replay.path,
         "map": replay.map_name,
@@ -76,4 +84,6 @@ def build_summary(replay) -> dict:
         "frontmen": sorted(fmen),
         "event_counts": dict(event_counts),
         "battle_result": battle_result,
+        "objects_by_category": dict(obj_counts),
+        "position_readable_objects": pos_readable,
     }

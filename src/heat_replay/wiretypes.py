@@ -57,6 +57,8 @@ class WireType(enum.Enum):
     STRING = enum.auto()
     ENUM_POOL = enum.auto()  # *Compressor name/enum pools
     COMPOSITE = enum.auto()  # composites, vectors, maps, etc.
+    NESTED_REPLICATION = enum.auto()  # field with no schema type token: a nested replication
+    # set (e.g. a state-machine / timer sub-scheme replicated as its own journal)
     UNKNOWN = enum.auto()
 
     @property
@@ -131,12 +133,21 @@ _EXACT: dict[str, WireType] = {
     "CStdString": WireType.STRING,
 }
 
-_COMPRESSOR_RE = re.compile(r"Compressor>?$")
-_COMPOSITE_RE = re.compile(r"(Composite|vector<|map<|Map[A-Z])")
+_COMPRESSOR_RE = re.compile(r"(Compressor|Pool)>?$")
+_COMPOSITE_RE = re.compile(r"(Composite|vector<|map<|pair<|Map[A-Z])")
+# A namespaced scalar enum / name type — a small value set in a few bits, e.g.
+# ``cw::FinishReason``, ``cw::CHealthChangeType``, ``cw::vehicle::type::GameType``.
+_ENUM_NS_RE = re.compile(r"::[A-Za-z_]\w*$")
 
 
 def classify(type_name: str | None) -> WireType:
-    """Map a schema wire-type name to a :class:`WireType` (``UNKNOWN`` if unrecognised)."""
+    """Map a schema wire-type name to a :class:`WireType`.
+
+    Returns ``UNKNOWN`` only for ``None``/empty or a lowercase non-type token; any bare
+    CamelCase token is treated as a nested sub-component (``COMPOSITE``). See
+    :func:`field_wire_type` for the field-level variant that maps an untyped field to
+    ``NESTED_REPLICATION`` rather than ``UNKNOWN``.
+    """
     if not type_name:
         return WireType.UNKNOWN
     wt = _EXACT.get(type_name)
@@ -146,7 +157,25 @@ def classify(type_name: str | None) -> WireType:
         return WireType.ENUM_POOL
     if _COMPOSITE_RE.search(type_name):
         return WireType.COMPOSITE
+    if _ENUM_NS_RE.search(type_name):
+        return WireType.ENUM_POOL
+    # A bare CamelCase token that names another schema class is a nested sub-component.
+    if type_name[:1].isupper():
+        return WireType.COMPOSITE
     return WireType.UNKNOWN
+
+
+def field_wire_type(field) -> WireType:
+    """The :class:`WireType` of a :class:`~heat_replay.model.SchemaField`.
+
+    Like :func:`classify`, but a field with no schema type token (only ``name=id``) is a
+    nested replication set rather than an unknown — the schema simply doesn't inline a type
+    for it. Every replicated field therefore maps to a concrete category (never ``UNKNOWN``),
+    which is what lets the field map be exhaustively wired.
+    """
+    if field.type is None:
+        return WireType.NESTED_REPLICATION
+    return classify(field.type)
 
 
 def decode(wire_type: WireType, rs: ReadStream):

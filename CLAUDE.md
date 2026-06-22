@@ -39,9 +39,64 @@ Fully decoded and exposed: container/header, embedded schema (per-field wire typ
 build-stable), the complete record stream (100% byte coverage), RNG seed, entity spawns,
 asset inventory, match metadata/result, roster, typed events, and the per-field wire-type map.
 
-Framed but not typed: the per-entity replication values (property journals). They are exposed
-as raw `(frame, handle, value)` deltas via `property_deltas()`. Typed value decoding is not
-implemented — the encoding is a bit-level presence mask + bit-packed fields whose per-type
-quantization constants are not present in the replay, and there is no stable handle→class key.
-Multiple offline reconstruction approaches have been investigated and found insufficient; the
-detailed record is in `docs/` (gitignored).
+Framed, and now partially typed: the per-entity replication values (property journals) are
+exposed as raw `(frame, handle, value)` deltas via `property_deltas()`. Typed value decoding is
+**in progress** (no longer blocked). The wire format is now understood:
+
+- The bit stream is **LSB-first**. A journal frame is `frameId:u32, flag:1, two component
+  unique-sets, componentCount:u32`, then per component `networkId:7bits` followed by **every
+  property in field order**. There is **no separate per-property presence bitmask** — earlier
+  offline analysis mis-read the concatenated per-property selector bits as a mask. "No change /
+  zero" is encoded inside each property's selector.
+- Float fields are **variable-width packed scalars**: a selector picks a bit-width tier, then a
+  stripped mantissa + sign rebuild an IEEE-754 value (see `heat_replay.packed_scalar`,
+  round-trip unit-tested). A plain float is full precision packed at a bit offset, not byte-aligned.
+- Validated end-to-end on real data: a static/initial **world position** (a plain 3×float32 field,
+  not byte-aligned) decodes from tag-6 baselines to sane world coordinates (373/373 across the four
+  samples; a static map entity yields the identical coordinate in every replay). Position is split
+  by purpose across components: the static/initial position is the plain-float triple; the **moving
+  per-frame world transform** is a separate component carrying a packed-scalar `CFixedVec3` position
+  + packed-quaternion rotation (codec implemented; per-field tier/scale still being calibrated
+  against continuity); a third "local transform" is parent-relative (often origin). (An earlier note
+  attributed the validated triple to the rigid-body transform — it is actually the plain-float
+  storage component; the rigid-body transform is the packed one.)
+
+Object identification + positions: `Replay.objects()` returns every replicated-entity lifetime
+(identified by prefab → category: vehicle / player / projectile / ability / …), segmented across
+recycled entity slots, with decoded positions where a plain-float position field sits at a baseline
+head. `Replay.moving_objects()` is the position-readable subset; `summary()` carries
+`objects_by_category`. Identification is reliable and complete. Position reading is currently
+limited to baseline-head plain-float positions (correct for static/map objects; dense moving
+trajectories require decoding the packed transform through a full per-component walk).
+
+Component table fully typed from the embedded schema: the replicated components are **not**
+disjoint from the schema — earlier the schema parser's class detector keyed on a name-suffix
+heuristic and silently dropped every single-word component (Mana, Driver, Shoot, …) and every
+zero-field marker. `schema.py` now detects classes **structurally** (a name leaf carrying the
+`default` sentinel or a parseable field list is a class), lifting the parse from 189 to 263
+classes. Field types are read positionally (the second token of each field def), so arrays
+(`vector<…>`), namespaced enums (`cw::…`) and nested sub-components are captured verbatim — **592
+of 712 fields now carry a type** (was ~336); the residual 120 are genuinely type-less
+nested-replication entries in the schema. `wiretypes.field_wire_type()` maps **every** replicated field (712/712, 0 unknown) to a concrete
+category: fixed primitives (`CBool`(1b), `CUint8/16/32/64`, `CInt8/32/64`, `CPlainFloat32`(32b),
+`CPlainVec3`(96b), `CPlayerId`), quantized packed scalars (`CFixed32`/`CFixedVec3`/`CBounded32`/
+`CFixedQuat`), variable-length (`CEntityNetworkId`/`CStdString`), enum/name pools (`*Compressor`,
+`cw::*` scalars), composites/arrays (nested → recurse), and `NESTED_REPLICATION` for the
+schema-typeless fields (a nested replication sub-scheme with no inlined type). Field categorisation
+is exhaustive — the field map is fully wired to the decode machinery (`Replay.field_types()`).
+
+Moving-entity tracking over time: the per-tick replication channel keys every packet by a
+recycled entity *slot* (a `u16` in the packet header); spawn packets in that channel embed a
+prefab path, so each per-frame update run links back to the prefab that opened its slot. This
+yields a **prefab-identified, time-resolved track** (identity + lifetime: frame span + update
+cadence) for every replicated entity across the whole match — see
+`examples/track_tag4_entities.py`. Identity and lifetime are fully determined by the replay;
+world positions are not (next paragraph).
+
+Still open — a dense per-frame *world-space* trajectory: the per-frame channel body is a
+bit-packed **delta** stream. Measured exhaustively (no absolute positions decode from it at any
+offset/param; baselines are spawn-only), so a metric trajectory needs (1) a baseline cache +
+stateful delta-application client and (2) the delta codec's per-field quantization constants,
+which are **not carried in the replay file** — they require an external parameter capture. The
+self-delimiting packed-scalar path is implemented and the entity track above is the scaffold a
+decode would attach to. Detailed record in `docs/` (gitignored).

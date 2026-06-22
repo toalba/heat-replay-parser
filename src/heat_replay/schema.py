@@ -290,6 +290,10 @@ class _Parser:
 # ---------------------------------------------------------------------------
 
 
+# Sentinel leaf words that sit inside a class entry but never name a class themselves.
+_CLASS_SENTINELS = frozenset({"default"})
+
+
 def _is_class_name(name: str) -> bool:
     """Heuristic: does a quoted name denote a network class/message (vs a field)?
 
@@ -364,8 +368,14 @@ def _collect_fields(class_list_node) -> list[SchemaField]:
                     if name is None:
                         name = nm
                         fid = sub[2]
-                    elif ftype is None and _looks_like_type(nm):
-                        ftype = nm
+                    elif ftype is None:
+                        # Field defs are positional: the second quoted name is the field's type
+                        # token — a primitive (``CUint8``), an array (``vector<CUint32>``), or a
+                        # named enum/compressor/sub-class (``cw::FinishReason``). Capture it
+                        # verbatim; classification happens downstream. When that token is the
+                        # ``default`` sentinel, the entry is a *nested sub-component*: the field
+                        # name is itself the embedded class, so the type is that class name.
+                        ftype = name if nm in _CLASS_SENTINELS else nm
                 elif key[0] == "int" and name is not None:
                     # The wire-type carries two trailing numeric leaves: a type-hash then a
                     # per-field flag. The number is in the key, not the positional id.
@@ -396,18 +406,31 @@ def _build_classes(node, proto: Protocol) -> None:
         return
     children = node[1]
     for idx, child in enumerate(children):
-        if child[0] == "leaf" and child[1][0] == "name" and _is_class_name(child[1][1]):
+        if child[0] == "leaf" and child[1][0] == "name" and child[1][1] not in _CLASS_SENTINELS:
             cname = child[1][1]
             cid = child[2]
-            # Find the next sibling list node that holds the field defs.
+            # Find the next sibling list node that holds the field defs (skipping the
+            # optional ``'default'`` sentinel leaf that sits between name and fields).
             field_list = None
+            saw_default = False
             for follow in children[idx + 1 :]:
                 if follow[0] == "list":
                     field_list = follow
                     break
-                if follow[0] == "leaf" and follow[1][0] == "name" and _is_class_name(follow[1][1]):
-                    break  # ran into the next class without a field list
+                if follow[0] == "leaf" and follow[1][0] == "name":
+                    if follow[1][1] in _CLASS_SENTINELS:
+                        saw_default = True
+                        continue
+                    break  # ran into the next sibling name without a field list
             fields = _collect_fields(field_list) if field_list is not None else []
+            # A name denotes a class when it is namespaced / suffix-typed (the original
+            # heuristic) OR — structurally — when it carries the ``'default'`` sentinel or a
+            # field list. The structural tests recover single-word components (Mana, Driver,
+            # Shoot, ...) and zero-field marker components the suffix heuristic alone misses.
+            if _looks_like_type(cname):
+                continue  # a wire-type name leaf, not a class
+            if not (_is_class_name(cname) or saw_default or fields):
+                continue
             cdef = ClassDef(name=cname, id=cid, fields=fields)
             # First definition wins for stability; same name shouldn't recur.
             proto.classes_by_name.setdefault(cname, cdef)

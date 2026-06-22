@@ -18,3 +18,9 @@ replays/*.replay
 
 # internal notes (not for publication)
 /docs/
+# session scratch / planning docs (internal, not for publication)
+GOAL_*.md
+*:Zone.Identifier
+*.Zone.Identifier
+# analysis probe referencing engine-internal codenames — kept out of the public repo
+examples/stage_a0_tag4_position_scan.py

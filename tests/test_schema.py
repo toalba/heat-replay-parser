@@ -102,6 +102,55 @@ def test_field_wire_types_captured(samples):
     assert "CPlainVec3" in type_names
 
 
+def test_structural_class_detection_and_positional_types(samples):
+    """Single-word components and positional field types are recovered from the schema.
+
+    Class detection is structural (not name-suffix gated), so single-word components and
+    zero-field markers parse; the field type is the positional second token, so arrays,
+    namespaced enums and nested sub-components are all captured verbatim.
+    """
+    proto = parse_schema(
+        extract_schema_text(_read(next(iter(samples.values())))), REFERENCE_COMMIT
+    )
+    # Single-word components the old suffix heuristic dropped.
+    for name in ("Mana", "Driver", "Shoot", "Health"):
+        assert name in proto.classes_by_name, name
+
+    def ftype(cls, field):
+        return next(f.type for f in proto.classes_by_name[cls].fields if f.name == field)
+
+    assert ftype("Mana", "curValue") == "CPlainFloat32"           # primitive
+    assert ftype("Shoot", "barrels") == "vector<CEntityNetworkId>"  # array
+    assert ftype("Driver", "lastDriveMode") == "cw::CDrivingMode"   # namespaced enum
+
+    # Nearly every field now carries a type token (the positional capture); the residual
+    # untyped fields are genuinely type-less nested-replication entries in the schema.
+    fields = [f for c in proto.classes_by_name.values() for f in c.fields]
+    typed = [f for f in fields if f.type]
+    assert len(typed) / len(fields) > 0.80
+
+
+def test_every_field_maps_to_a_wire_category(samples):
+    """Exhaustive wiring: every replicated field resolves to a concrete WireType.
+
+    Typed fields classify by their token; the schema-typeless fields (no type token, just
+    ``name=id``) are nested replication sets. Nothing should fall through to ``UNKNOWN`` —
+    that is what makes the field map fully wired to the decode machinery.
+    """
+    from heat_replay.wiretypes import WireType, field_wire_type
+
+    proto = parse_schema(
+        extract_schema_text(_read(next(iter(samples.values())))), REFERENCE_COMMIT
+    )
+    unknown = [
+        (c.name, f.name)
+        for c in proto.classes_by_name.values()
+        for f in c.fields
+        if field_wire_type(f) is WireType.UNKNOWN
+    ]
+    assert not unknown, f"uncategorized fields: {unknown[:10]}"
+
+
 def test_field_type_map_identical_across_samples(samples):
     """The (class, field) -> wire-type map is build-stable, like the flat index."""
     maps: dict[str, list] = {}

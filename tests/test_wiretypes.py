@@ -36,8 +36,16 @@ def test_classify_fallbacks():
     assert classify("CVectorMapUint8Uint8Compressor") is WireType.ENUM_POOL
     assert classify("CBallisticsHistoryInfoComposite") is WireType.COMPOSITE
     assert classify("vector<float>") is WireType.COMPOSITE
+    assert classify("pair<TypedName, float>") is WireType.COMPOSITE
     assert classify(None) is WireType.UNKNOWN
-    assert classify("TotallyUnknown") is WireType.UNKNOWN
+    # Namespaced scalar enums (a small value set in a few bits).
+    assert classify("cw::FinishReason") is WireType.ENUM_POOL
+    assert classify("cw::vehicle::type::GameType") is WireType.ENUM_POOL
+    # A bare CamelCase token names another schema class — a nested sub-component.
+    assert classify("Mana") is WireType.COMPOSITE
+    assert classify("TransformRequestComponent") is WireType.COMPOSITE
+    # Genuinely unrecognised (lowercase / non-type) tokens stay UNKNOWN.
+    assert classify("lowercase_token") is WireType.UNKNOWN
 
 
 def test_bit_width_and_decodable_flags():

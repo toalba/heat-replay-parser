@@ -65,9 +65,26 @@ Object identification + positions: `Replay.objects()` returns every replicated-e
 (identified by prefab → category: vehicle / player / projectile / ability / …), segmented across
 recycled entity slots, with decoded positions where a plain-float position field sits at a baseline
 head. `Replay.moving_objects()` is the position-readable subset; `summary()` carries
-`objects_by_category`. Identification is reliable and complete. Position reading is currently
-limited to baseline-head plain-float positions (correct for static/map objects; dense moving
-trajectories require decoding the packed transform through a full per-component walk).
+`objects_by_category`. Identification is reliable and complete.
+
+Moving trajectories — the full per-frame walk is implemented in `heat_replay.replication`
+(`Replay.replication_positions()` / `replication_trajectories()`): the self-delimiting per-entity
+body walk (component back-reference cache + per-property presence bits), cross-packet entity
+identity (`EntityIdResolver`), the packed-scalar moving position, and per-entity track integration
+(seed absolute from add-frames, accumulate update deltas). All codec logic is synthetic round-trip
+tested. The walk is a **parameterized engine**: it takes a per-component property-count table and a
+per-property wire-type table. **Both are derived from the embedded schema** by
+`Replay.schema_replication_layout({component_id: class_name})` — the schema carries each class's
+replicated properties in wire order with their types, so counts and per-property codecs are read
+straight from the replay; the one input not in the file is which schema class each numeric component
+id denotes (build-specific; caller supplies it). Each value is consumed by its codec via
+`heat_replay.wire_value` (fixed primitives, packed scalar/vec3, entity-reference, length-prefixed
+string — all self-delimiting and round-trip tested), so the walk stays byte-exact across far more of
+each packet than property counts alone. Fields whose codec is still build-specific or unmodelled
+(length-delimited vectors, nested replication sub-schemes, some name-pool enumerations) halt a
+packet's remaining walk, so density scales directly with codec coverage — identity needs complete
+packet walks. `examples/decode_trajectories_from_schema.py` runs the whole path; identity + lifetime
+alone (no positions) is the slot-based `examples/track_tag4_entities.py`.
 
 Component table fully typed from the embedded schema: the replicated components are **not**
 disjoint from the schema — earlier the schema parser's class detector keyed on a name-suffix
@@ -123,9 +140,10 @@ known map position. The remaining work is two-fold and bounded:
 1. **A short residual codec list** — length-prefixed strings / id-references / vectors / a few enums
    (mostly structural), plus a handful of components whose schema class is unmapped. Several are
    implemented; the rest are the finishing grind.
-2. **Per-entity trajectory assembly** — turning correct per-frame position *reads* into per-entity
-   *paths* needs cross-packet entity identity (the reference-relative id codec resolved against the
-   previous packet's id-list), which in turn needs near-complete packet walks to build correct
-   id-lists. So a dense world-space trajectory is gated on raising codec coverage (item 1) enough for
-   reliable identity, then grouping by it. The position value itself is correct — assembling the path
-   is the next step. Detailed record in `docs/` (gitignored).
+2. **Per-entity trajectory assembly** — now **implemented** (`heat_replay.replication`): the
+   reference-relative entity-id codec (`EntityIdResolver`) and the seed-and-accumulate integrator
+   are built and synthetic-tested. It is still *gated* the same way — resolving an entity's id needs
+   the prior packet's id-list to be complete, which needs a complete body walk (item 1) — so dense,
+   fully-attributed paths scale with value-width coverage. The position value and the assembly
+   machinery are both correct; coverage is the remaining variable. Detailed record in `docs/`
+   (gitignored).

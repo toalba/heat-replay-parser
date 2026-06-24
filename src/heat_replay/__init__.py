@@ -224,6 +224,112 @@ class Replay:
         # two views consistent.
         return [o for o in self.objects() if o.positions]
 
+    def replication_positions(
+        self,
+        property_counts: dict,
+        value_widths: dict | None = None,
+        position_component: int = 14,
+        field_types: dict | None = None,
+        enum_widths: dict | None = None,
+    ) -> list[tuple]:
+        """Walk the per-frame (tag-4) channel and return ``(slot, mode, position)`` for every
+        decoded moving-transform position. ``slot`` is the packet's recycled per-entity occupancy
+        id (read directly from the header — the reliable identity); ``mode`` is 1 (add / absolute)
+        or 0 (update / delta).
+
+        ``property_counts`` (``{component_id: n}``) gives each component's property count;
+        ``field_types`` (``{(component_id, prop): wire_type_name}``) lets each value be consumed by
+        its schema codec. Both can be derived from the embedded schema given a component-id → class
+        mapping (see :meth:`schema_replication_layout`). ``value_widths``
+        (``{(component_id, prop): bit_width}``) overrides a field with an explicit width;
+        ``enum_widths`` (``{wire_type_name: bit_width}``) sizes enumeration types. A property whose
+        codec/width is unknown blocks that packet's remaining walk, so density scales with codec
+        coverage. See :mod:`heat_replay.replication`.
+        """
+        from heat_replay.replication import FrameWalker
+
+        packets = [
+            p for r in self.stream.records
+            if r.tag == 4 and r.packets for p in r.packets if len(p) >= 8
+        ]
+        walker = FrameWalker(property_counts, value_widths, position_component,
+                             field_types, enum_widths)
+        return list(walker.walk_packets(packets))
+
+    def replication_trajectories(
+        self,
+        property_counts: dict,
+        value_widths: dict | None = None,
+        position_component: int = 14,
+        field_types: dict | None = None,
+        enum_widths: dict | None = None,
+    ) -> dict:
+        """Per-slot position tracks assembled from :meth:`replication_positions` (seed absolute
+        from add-frames, accumulate update deltas). Returns ``{slot: [position, ...]}``. Track
+        length scales with codec coverage (more decoded positions per slot)."""
+        from heat_replay.replication import integrate_trajectories
+
+        return integrate_trajectories(
+            self.replication_positions(property_counts, value_widths, position_component,
+                                       field_types, enum_widths)
+        )
+
+    def replication_coherent_tracks(
+        self,
+        property_counts: dict,
+        value_widths: dict | None = None,
+        position_component: int = 14,
+        field_types: dict | None = None,
+        enum_widths: dict | None = None,
+        max_step: float = 150.0,
+        min_points: int = 3,
+    ) -> list[list[tuple]]:
+        """Physically-coherent, directly-plottable position tracks for the moving entities.
+
+        Like :meth:`replication_trajectories` but, because occupancy slots are recycled (a slot
+        freed by one entity is later reclaimed by another), each slot's integrated track is split
+        into segments at every absolute re-seed and at any single step longer than ``max_step``
+        metres — a one-tick jump that large is slot reuse, not motion. Returns the list of segments
+        (each a list of ``(x, y, z)``) with at least ``min_points`` points. ``max_step`` is a plain
+        physical-plausibility bound, not a decoded value. Segment count and length scale with codec
+        coverage (more decoded positions per slot). See
+        :func:`heat_replay.replication.coherent_tracks`."""
+        from heat_replay.replication import coherent_tracks
+
+        return coherent_tracks(
+            self.replication_positions(property_counts, value_widths, position_component,
+                                       field_types, enum_widths),
+            max_step=max_step, min_points=min_points,
+        )
+
+    def schema_replication_layout(self, component_classes: dict) -> tuple[dict, dict]:
+        """Build ``(property_counts, field_types)`` for the replication walk from the embedded
+        schema, given ``component_classes`` mapping ``{component_id: schema_class_name}``.
+
+        The schema (parsed into ``self.protocol``) carries each class's replicated properties in
+        wire order with their types, so the per-component property count and per-property wire type
+        are read directly from it — no external width table needed. ``component_classes`` is the one
+        piece not in the replay (which schema class each numeric component id denotes); callers
+        supply it. Returns tables ready for :meth:`replication_positions`."""
+        if self.protocol is None:
+            raise ValueError(
+                "no embedded schema available (replay carried none, or parsed with_schema=False); "
+                "schema_replication_layout needs the protocol"
+            )
+        counts: dict[int, int] = {}
+        types: dict[tuple[int, int], str] = {}
+        by_name = self.protocol.classes_by_name
+        for cid, cls_name in component_classes.items():
+            cls = by_name.get(cls_name)
+            if cls is None:
+                continue
+            fields = getattr(cls, "fields", [])
+            counts[int(cid)] = len(fields)
+            for i, f in enumerate(fields):
+                if f.type is not None:
+                    types[(int(cid), i)] = f.type
+        return counts, types
+
     def roster(self) -> list[dict]:
         """Distinct vehicle types in the match (``[{"nation", "vehicle"}]``)."""
         return _roster(self)

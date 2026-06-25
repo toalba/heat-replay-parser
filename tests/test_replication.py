@@ -6,6 +6,7 @@ trusted on real replay bytes (the measure-first discipline of this repo). No fix
 """
 from __future__ import annotations
 
+from heat_replay import wire_value
 from heat_replay.bitstream import ReadStream
 from heat_replay.packed_scalar import encode_scalar_bits
 from heat_replay.replication import (
@@ -184,3 +185,81 @@ def test_coherent_tracks_resume_after_break_with_update():
     for seg in segs:
         for a, b in zip(seg, seg[1:]):
             assert abs(a[0] - b[0]) <= 150.0
+
+
+# --- nested (variant) record bodies -------------------------------------------------------------
+def test_nested_variant_body_presence_walk():
+    # A variant element body is the tagged component's per-property presence-bit walk. Component 50
+    # has 3 properties (CUint8, CBool, CUint16); presence bits 1,0,1 -> read prop0 (8b), skip prop1,
+    # read prop2 (16b). The walk must land exactly on the next field boundary.
+    counts = {50: 3}
+    types = {(50, 0): "CUint8", (50, 1): "CBool", (50, 2): "CUint16"}
+    w = FrameWalker(counts, field_types=types, component_count=115)
+    writes = [(1, 1), (0xAB, 8), (0, 1), (1, 1), (0xBEEF, 16), (0b101, 3)]
+    rs = ReadStream(_pack_bits(writes))
+    w._nested(50, rs, 1)
+    assert rs.bits_read == 1 + 8 + 1 + 1 + 16
+    assert rs.read_bits(3) == 0b101   # not desynced
+
+
+def test_nested_variant_recurses_through_consume():
+    # vector<VariantCompressor> field on component 1, whose single element tags component 50; the
+    # whole value decodes through wire_value.consume + the nested presence walk, end to end.
+    counts = {1: 1, 50: 2}
+    types = {(1, 0): "vector<VariantCompressor>", (50, 0): "CUint8", (50, 1): "CUint16"}
+    w = FrameWalker(counts, field_types=types, component_count=115)
+    # count=1 (array-length packer sel=1 -> 4-bit tier, value 1), element: tag=50, presence 1,1.
+    writes = [(1, 2), (1, 4), (50, 32), (1, 1), (0xAB, 8), (1, 1), (0xBEEF, 16), (0b11, 2)]
+    rs = ReadStream(_pack_bits(writes))
+    w._value(rs, 1, 0, 1)
+    assert rs.bits_read == 2 + 4 + 32 + 1 + 8 + 1 + 16
+    assert rs.read_bits(2) == 0b11
+
+
+def test_nested_variant_unknown_tag_blocks():
+    # A tag outside the component-id range, or one with no known layout, must raise Unsupported so
+    # the caller blocks the packet instead of over-reading.
+    w = FrameWalker({}, component_count=115)
+    for bad in (200, 50):   # 200 = out of range; 50 = in range but no layout
+        rs = ReadStream(b"\x00\x00\x00\x00")
+        try:
+            w._nested(bad, rs, 1)
+        except wire_value.Unsupported:
+            pass
+        else:
+            raise AssertionError(f"tag {bad}: expected Unsupported")
+
+
+def test_nested_variant_delta_field_blocks_packet():
+    # In component update (delta) mode a variant field is unmodelled (stateful): _value must raise
+    # Blocked, not silently mis-consume.
+    from heat_replay.replication import Blocked
+    counts = {1: 1, 50: 1}
+    types = {(1, 0): "vector<VariantCompressor>", (50, 0): "CUint8"}
+    w = FrameWalker(counts, field_types=types, component_count=115)
+    rs = ReadStream(b"\x00\x00\x00\x00")
+    try:
+        w._value(rs, 1, 0, 0)   # mode 0 = update/delta
+    except Blocked:
+        pass
+    else:
+        raise AssertionError("expected Blocked for variant in delta mode")
+
+
+def test_nested_variant_unmodelled_field_attributes_block_to_variant():
+    # A variant element tags a class with an unmodelled property (no type/width): _nested must
+    # re-surface the inner Blocked as Unsupported so the outer field's block is attributed to the
+    # variant codec ("codec:vector<VariantCompressor>"), not to the inner property ("value:50.0").
+    from heat_replay.replication import Blocked
+    counts = {1: 1, 50: 1}
+    types = {(1, 0): "vector<VariantCompressor>"}     # nid50 prop 0 has no type -> unmodelled
+    w = FrameWalker(counts, field_types=types, component_count=115)
+    # count=1 (len packer sel=1 -> 4-bit tier, value 1); element tag=50; presence bit=1 (present).
+    writes = [(1, 2), (1, 4), (50, 32), (1, 1)]
+    rs = ReadStream(_pack_bits(writes))
+    try:
+        w._value(rs, 1, 0, 1)
+    except Blocked as exc:
+        assert exc.why == "codec:vector<VariantCompressor>", exc.why
+    else:
+        raise AssertionError("expected Blocked attributed to the variant field")

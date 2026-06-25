@@ -136,11 +136,76 @@ def test_array_delta_shrink_has_no_tail():
 def test_unsupported_without_enum_width_raises():
     rs = ReadStream(_pack([(0, 8)]))
     try:
-        wire_value.consume("vector<VariantCompressor>", rs, None)
+        wire_value.consume("vector<network::SomeUnknownCompressor>", rs, None)
     except wire_value.Unsupported as exc:
-        assert exc.field_type == "vector<VariantCompressor>"
+        assert exc.field_type == "vector<network::SomeUnknownCompressor>"
     else:
         raise AssertionError("expected Unsupported")
+
+
+# --- variant (tagged-record) values -------------------------------------------------------------
+def test_variant_scalar_absolute_roundtrip():
+    # A single VariantCompressor (add/absolute): a 32-bit type tag, then the tagged record body
+    # (here consumed by a stub nested reader that knows each tag's body width).
+    body = {7: 5, 42: 13, 100: 0}
+
+    def nested(tag, rs, mode):
+        assert mode == 1
+        rs.skip(body[tag])
+
+    for tag, w in body.items():
+        writes = [(tag, 32), (0, w)]
+        rs = ReadStream(_pack(writes + [(0b1011, 4)]))
+        wire_value.consume("VariantCompressor", rs, None, mode=1, nested=nested)
+        assert rs.bits_read == 32 + w, (tag, rs.bits_read)
+        assert rs.read_bits(4) == 0b1011
+
+
+def test_variant_vector_absolute_roundtrip():
+    # vector<VariantCompressor> (add/absolute): array-length-packed count, then each element is a
+    # 32-bit tag + its record body.
+    body = {7: 5, 42: 13, 100: 0}
+    tags = [7, 42, 7, 100]
+
+    def nested(tag, rs, mode):
+        rs.skip(body[tag])
+
+    writes = _enc_len(len(tags))
+    for tag in tags:
+        writes += [(tag, 32), (0, body[tag])]
+    expect = sum(w for _, w in writes)
+    rs = ReadStream(_pack(writes + [(0b1011, 4)]))
+    wire_value.consume("vector<VariantCompressor>", rs, None, mode=1, nested=nested)
+    assert rs.bits_read == expect
+    assert rs.read_bits(4) == 0b1011
+
+
+def test_variant_delta_mode_is_unsupported():
+    # The update/delta form reuses prior-tick per-element state a stateless walk lacks -> unmodelled.
+    def nested(tag, rs, mode):  # pragma: no cover - must not be reached
+        raise AssertionError("nested reader must not run in delta mode")
+
+    for t in ("VariantCompressor", "vector<VariantCompressor>"):
+        rs = ReadStream(_pack([(0, 32)]))
+        try:
+            wire_value.consume(t, rs, None, mode=0, nested=nested)
+        except wire_value.Unsupported:
+            pass
+        else:
+            raise AssertionError(f"{t}: expected Unsupported in delta mode")
+        assert rs.bits_read == 0, f"{t}: consumed bits before refusing"
+
+
+def test_variant_without_nested_reader_is_unsupported():
+    for t in ("VariantCompressor", "vector<VariantCompressor>"):
+        rs = ReadStream(_pack([(0, 32)]))
+        try:
+            wire_value.consume(t, rs, None, mode=1, nested=None)
+        except wire_value.Unsupported:
+            pass
+        else:
+            raise AssertionError(f"{t}: expected Unsupported without a nested reader")
+        assert rs.bits_read == 0
 
 
 def test_fixed_vec3_roundtrip_and_consumption():

@@ -44,6 +44,7 @@ _FRAME_DELTA_W = (3, 6, 12, 32)   # 2-bit selector -> frame-id delta width
 # against a decoded coordinate landing on a known map position).
 POSITION = ScalarParams((12, 16, 20, 24), 12, 1.0)
 _CACHE_SIZE = 4
+_MAX_NEST = 8                     # recursion bound for nested (variant) record bodies
 
 
 class Blocked(Exception):
@@ -199,6 +200,7 @@ class FrameWalker:
         self.n_comps = component_count
         self.cur_slot: int | None = None
         self.cache: list[int] = []
+        self._depth = 0
         self.resolver = EntityIdResolver()
         self.stats = {"packets": 0, "clean": 0, "blocked": defaultdict(int), "positions": 0,
                       "nid_reads": 0, "nid_oob": 0, "entity_reads": 0, "entity_unresolved": 0}
@@ -211,7 +213,8 @@ class FrameWalker:
         ftype = self.field_types.get((nid, i))
         if ftype is not None:
             try:
-                v = wire_value.consume(ftype, rs, self.enum_widths.get(ftype), mode)
+                v = wire_value.consume(ftype, rs, self.enum_widths.get(ftype), mode,
+                                       nested=self._nested)
             except wire_value.Unsupported:
                 raise Blocked(f"codec:{ftype}")
             return v if (nid == self.pos_nid and i == 0) else None
@@ -221,6 +224,36 @@ class FrameWalker:
             read_vec3(rs, POSITION)
             return None
         raise Blocked(f"value:{nid}.{i}")
+
+    def _nested(self, tag: int, rs: ReadStream, mode: int) -> None:
+        """Consume one nested replicated record — the body of a variant (tagged-record) element.
+
+        A variant element's 32-bit tag is the component id of the concrete replicated type it
+        carries, so its body is laid out exactly like a top-level component body: one presence bit
+        per property, the value inline when the bit is set. This recurses through :meth:`_value`,
+        reusing the same per-component layout (``property_counts`` / ``field_types``). A tag outside
+        the component-id range, an unknown layout, or excessive nesting raises
+        :class:`wire_value.Unsupported`, so the caller treats the variant as an unmodelled codec and
+        blocks the packet (no over-read)."""
+        if self.n_comps is not None and not (0 <= tag < self.n_comps):
+            raise wire_value.Unsupported("variant-tag")
+        n = self.pc.get(tag)
+        if n is None:
+            raise wire_value.Unsupported("variant-class")
+        if self._depth >= _MAX_NEST:
+            raise wire_value.Unsupported("variant-depth")
+        self._depth += 1
+        try:
+            for i in range(n):
+                if rs.read_bits(1):
+                    self._value(rs, tag, i, mode)
+        except Blocked:
+            # A nested-record property with no modelled codec: re-surface as Unsupported so the
+            # caller attributes the block to the variant field itself (per this method's contract),
+            # rather than letting the inner property's Blocked escape uncaught.
+            raise wire_value.Unsupported("variant-body") from None
+        finally:
+            self._depth -= 1
 
     def _body(self, rs: ReadStream, out: list) -> None:
         mode = _read_comp_mode(rs)

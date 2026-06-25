@@ -16,6 +16,8 @@ width for enumerations via ``enum_width``. All codecs here have round-trip unit 
 """
 from __future__ import annotations
 
+from typing import Callable
+
 from heat_replay.bitstream import ReadStream
 from heat_replay.packed_scalar import ScalarParams, read_scalar, read_vec3
 
@@ -43,6 +45,17 @@ _ARRAY_LEN_W = (1, 4, 8, 16)
 # A variable-length byte store ("variable storage") is a length-prefixed byte vector: it uses the
 # array length packer for the count and 8 bits per element, like ``vector<CUint8>``.
 _VARIABLE_STORAGE = "cw::VariableStorageCompressor"
+
+# A "variant" value is a tagged record: a 32-bit type tag selects which record layout follows, then
+# that record's body is read. The tag is the numeric id of the concrete replicated type, so its body
+# is that type's property record — decoded by recursing into the same per-property walk. A
+# ``NestedReader`` callback supplies that recursion (the layout per tag is build-specific, like the
+# rest of the per-component layout, so it is not known to this module): given ``(tag, rs, mode)`` it
+# consumes exactly one record body of the type the tag denotes (or raises :class:`Unsupported` when
+# that type's layout is unknown or carries an unmodelled field).
+_VARIANT = "VariantCompressor"
+_VARIANT_TAG_BITS = 32
+NestedReader = Callable[[int, ReadStream, int], None]
 
 
 class Unsupported(Exception):
@@ -134,6 +147,15 @@ def _consume_array(rs: ReadStream, element, mode: int) -> None:
         element(rs)                                 # grown tail (appended elements)
 
 
+def _read_variant_element(rs: ReadStream, nested: NestedReader, mode: int) -> None:
+    """Consume one tagged variant value: a 32-bit type tag, then the record body of the type the tag
+    denotes (read via ``nested``). Only the add/absolute form is self-delimiting — the tag and body
+    are read straight from the wire; the update/delta form reuses the prior tick's per-element type
+    and size, state a stateless walk does not carry, so the caller must gate on ``mode == 1``."""
+    tag = rs.read_bits(_VARIANT_TAG_BITS)
+    nested(tag, rs, mode)
+
+
 def _array_inner(field_type: str) -> str | None:
     """If ``field_type`` is an array type (``vector<INNER>``), return ``INNER``; else ``None``."""
     if field_type and field_type.startswith("vector<") and field_type.endswith(">"):
@@ -142,7 +164,7 @@ def _array_inner(field_type: str) -> str | None:
 
 
 def consume(field_type: str | None, rs: ReadStream, enum_width: int | None = None,
-            mode: int = 1):
+            mode: int = 1, nested: NestedReader | None = None):
     """Consume one value of ``field_type`` from ``rs``.
 
     Returns the decoded ``(x, y, z)`` for a packed 3-vector (``CFixedVec3``) — the only type that
@@ -150,8 +172,10 @@ def consume(field_type: str | None, rs: ReadStream, enum_width: int | None = Non
     width used for an enumeration / name-pool type whose width is build-specific. ``mode`` is the
     component update mode (1 = add / absolute, 0 = update / delta) and selects the wire form for
     delta-capable codecs (arrays); fixed and other self-delimiting scalar codecs ignore it because
-    their on-wire size is identical in both modes. Raises :class:`Unsupported` when the type's codec
-    is not modelled and no ``enum_width`` is supplied.
+    their on-wire size is identical in both modes. ``nested`` consumes the body of a variant
+    (tagged-record) value given its decoded type tag; without it, or in delta mode, a variant raises
+    :class:`Unsupported`. Raises :class:`Unsupported` when the type's codec is not modelled and no
+    ``enum_width`` is supplied.
     """
     t = field_type
     if t in _FIXED:
@@ -184,8 +208,19 @@ def consume(field_type: str | None, rs: ReadStream, enum_width: int | None = Non
     if t == _VARIABLE_STORAGE:                     # length-prefixed byte store == vector<CUint8>
         _consume_array(rs, lambda r: _consume_bits(r, 8), mode)
         return None
+    if t == _VARIANT:                              # a single tagged-record value
+        if mode != 1 or nested is None:
+            raise Unsupported(t)                   # delta form is stateful; no recursion supplied
+        _read_variant_element(rs, nested, 1)
+        return None
     inner = _array_inner(t) if t else None
     if inner is not None:
+        if inner == _VARIANT:                      # vector of tagged records: count then elements
+            if mode != 1 or nested is None:
+                raise Unsupported(t)               # delta form is stateful; no recursion supplied
+            for _ in range(_read_array_len(rs)):
+                _read_variant_element(rs, nested, 1)
+            return None
         element = _element_codec(inner)
         if element is None:
             raise Unsupported(t)                   # element codec not modelled yet
